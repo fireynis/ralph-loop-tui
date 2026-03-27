@@ -7,12 +7,16 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/fireynis/ralph-loop-go/screens"
 )
 
 const maxConsecutiveErrors = 3
 
 // Init starts first iteration and a periodic tick
 func (m model) Init() tea.Cmd {
+	if m.demoMode {
+		return tick()
+	}
 	m.sendEvent(EventSessionStarted, map[string]any{
 		"max_iterations":    m.maxIter,
 		"sleep_seconds":     int(m.sleep.Seconds()),
@@ -96,6 +100,21 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.outputVP.GotoBottom()
 				}
 			}
+
+		// Demo mode: navigate scenarios
+		case "n":
+			if m.demoMode {
+				idx := (m.demoScenarioIdx + 1) % len(demoScenarios)
+				applyDemoScenario(&m, idx)
+			}
+		case "p":
+			if m.demoMode {
+				idx := m.demoScenarioIdx - 1
+				if idx < 0 {
+					idx = len(demoScenarios) - 1
+				}
+				applyDemoScenario(&m, idx)
+			}
 		}
 
 	case preflightDoneMsg:
@@ -109,6 +128,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		m.analytics.initialReady = msg.readyCount
 		m.analytics.currentReady = msg.readyCount
+		m.analytics.totalTasks = msg.readyCount + msg.blockedCount + msg.inProgressCount
+		m.analytics.blockedCount = msg.blockedCount
 
 		epicLabel := "all work"
 		if m.epic != "" {
@@ -119,6 +140,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			msg.readyCount, msg.blockedCount, msg.inProgressCount, msg.totalOpenCount))
 
 		if msg.graphOutput != "" {
+			m.graphOutput = msg.graphOutput
 			m.appendHomebase("")
 			m.appendHomebase("=== Dependency Graph ===")
 			m.appendHomebase(msg.graphOutput)
@@ -161,6 +183,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.reviewCycle = 0
 		m.gathererOutput = ""
 		m.reviewerFeedback = ""
+		m.activityLines = nil
+		m.currentTaskID = ""
+		m.currentTaskTitle = ""
 
 		// Add iteration header to output screens
 		m.appendOutput(fmt.Sprintf("--- Iteration %d Output ---", m.iteration))
@@ -191,21 +216,26 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Parse single line and display if it's meaningful
 		parsed := ParseStreamLine(line)
 		if parsed != nil {
-			// Add to parsed output content (but don't update viewport yet)
-			if m.outputContent == "" {
-				m.outputContent = parsed.Summary
-			} else {
-				m.outputContent = m.outputContent + "\n" + parsed.Summary
+			styled := screens.FormatParsedEventStyled(parsed.Type, parsed.Summary, parsed.Highlight, parsed.HighlightKind)
+
+			// Add blank line before tool_call (visual grouping)
+			if parsed.Type == "tool_call" && m.outputContent != "" {
+				m.outputContent += "\n"
 			}
 
-			// Show key events on homebase (tool calls, results, text)
+			if m.outputContent == "" {
+				m.outputContent = styled
+			} else {
+				m.outputContent = m.outputContent + "\n" + styled
+			}
+
+			// Show key events in activity feed (replaces appendHomebase)
 			switch parsed.Type {
-			case "tool_call", "result":
-				m.appendHomebase("  " + parsed.Summary)
+			case "tool_call", "tool_result":
+				m.appendActivity(screens.FormatParsedEventStyled(parsed.Type, parsed.Summary, parsed.Highlight, parsed.HighlightKind))
 			case "text":
-				// Only show short text on homebase
 				if len(parsed.Summary) < 100 {
-					m.appendHomebase("  " + parsed.Summary)
+					m.appendActivity(screens.FormatParsedEventStyled(parsed.Type, parsed.Summary, parsed.Highlight, parsed.HighlightKind))
 				}
 			}
 		}
@@ -230,11 +260,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.endTime = time.Now()
 			m.lastError = msg.err.Error()
 			m.consecutiveErrors++
-			m.appendHomebase(fmt.Sprintf("Error: %v", msg.err))
+			m.appendActivity(fmt.Sprintf("Error: %v", msg.err))
 
 			// Record failed iteration
 			elapsed := m.endTime.Sub(m.startTime)
-			m.analytics.addIteration(m.iteration, elapsed, false, "", msg.err.Error(), "ERROR", 0)
+			m.analytics.addIteration(m.iteration, elapsed, false, "", "", msg.err.Error(), "ERROR", 0)
 			m.sendEvent(EventIterationCompleted, map[string]any{
 				"iteration":     m.iteration,
 				"duration_ms":   elapsed.Milliseconds(),
@@ -254,7 +284,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.consecutiveErrors < maxConsecutiveErrors {
 				m.status = statusError
 				m.statusText = fmt.Sprintf("Error running Claude (retry %d/%d)", m.consecutiveErrors, maxConsecutiveErrors)
-				m.appendHomebase(fmt.Sprintf("  Transient error, retrying (%d/%d)...", m.consecutiveErrors, maxConsecutiveErrors))
+				m.appendActivity(fmt.Sprintf("  Transient error, retrying (%d/%d)...", m.consecutiveErrors, maxConsecutiveErrors))
 				return m, tea.Tick(m.sleep, func(time.Time) tea.Msg {
 					return startIterationMsg{}
 				})
@@ -263,7 +293,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// Retries exhausted — stop the loop
 			m.status = statusFinished
 			m.statusText = "Stopped (repeated Claude errors)"
-			m.appendHomebase(fmt.Sprintf("  %d consecutive errors — stopping loop", m.consecutiveErrors))
+			m.appendActivity(fmt.Sprintf("  %d consecutive errors — stopping loop", m.consecutiveErrors))
 			m.sendEvent(EventPhaseChanged, map[string]any{
 				"from": m.currentPhase.String(),
 				"to":   "error",
@@ -277,6 +307,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		switch m.currentPhase {
 		case phaseContextGatherer:
 			m.gathererOutput = ExtractFullText(msg.output)
+			if gathered := parseContextGathererOutput(msg.output); gathered != nil {
+				m.currentTaskID = gathered.Task
+				m.currentTaskTitle = gathered.TaskTitle
+			}
 			m.currentPhase = phaseDev
 			m.sendEvent(EventPhaseChanged, map[string]any{
 				"from": "context-gatherer",
@@ -284,6 +318,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			})
 			m.statusText = fmt.Sprintf("Iteration %d • dev", m.iteration)
 			m.appendHomebase("Phase: dev")
+			m.appendOutput(screens.FormatPhaseHeader("dev", m.iteration))
 			return m, runClaudeCmd(m.ctx, m.claudePath, buildDevPrompt(m.epic, m.gathererOutput))
 
 		case phaseDev:
@@ -304,6 +339,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			specialist := detectSpecialist(diff)
 			m.statusText = fmt.Sprintf("Iteration %d • reviewer (%d/%d)", m.iteration, m.reviewCycle, m.maxReviewCycles)
 			m.appendHomebase(fmt.Sprintf("Phase: reviewer (cycle %d/%d)", m.reviewCycle, m.maxReviewCycles))
+			m.appendOutput(screens.FormatPhaseHeader("reviewer", m.iteration))
 			return m, runClaudeCmd(m.ctx, m.claudePath, buildReviewerPrompt(m.gathererOutput, diff, specialist))
 
 		case phaseReviewer:
@@ -329,6 +365,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 				if ralphStatus != nil {
 					taskID = ralphStatus.Task
+					if ralphStatus.TaskTitle != "" {
+						m.currentTaskTitle = ralphStatus.TaskTitle
+					}
 					if m.analytics.initialReady == 0 && ralphStatus.ReadyBefore > 0 {
 						m.analytics.initialReady = ralphStatus.ReadyBefore
 					}
@@ -336,7 +375,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 
 				elapsed := m.endTime.Sub(m.startTime)
-				m.analytics.addIteration(m.iteration, elapsed, passed, taskID, notes, finalVerdict, m.reviewCycle)
+				m.analytics.addIteration(m.iteration, elapsed, passed, taskID, m.currentTaskTitle, notes, finalVerdict, m.reviewCycle)
 				m.sendEvent(EventIterationCompleted, map[string]any{
 					"iteration":     m.iteration,
 					"duration_ms":   elapsed.Milliseconds(),
@@ -372,6 +411,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			})
 			m.statusText = fmt.Sprintf("Iteration %d • fixer", m.iteration)
 			m.appendHomebase(fmt.Sprintf("Phase: fixer (reviewer cycle %d/%d requested changes)", m.reviewCycle-1, m.maxReviewCycles))
+			m.appendOutput(screens.FormatPhaseHeader("fixer", m.iteration))
 			return m, runClaudeCmd(m.ctx, m.claudePath, buildFixerPrompt(m.epic, m.gathererOutput, m.reviewerFeedback))
 
 		case phaseFixer:
@@ -384,13 +424,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			specialist := detectSpecialist(diff)
 			m.statusText = fmt.Sprintf("Iteration %d • reviewer (%d/%d)", m.iteration, m.reviewCycle, m.maxReviewCycles)
 			m.appendHomebase(fmt.Sprintf("Phase: reviewer (cycle %d/%d)", m.reviewCycle, m.maxReviewCycles))
+			m.appendOutput(screens.FormatPhaseHeader("reviewer", m.iteration))
 			return m, runClaudeCmd(m.ctx, m.claudePath, buildReviewerPrompt(m.gathererOutput, diff, specialist))
 
 		default:
 			m.status = statusFinished
 			m.statusText = "Unknown phase"
 			m.lastError = fmt.Sprintf("unexpected phase: %d", m.currentPhase)
-			m.appendHomebase(fmt.Sprintf("Error: unexpected phase %d", m.currentPhase))
+			m.appendActivity(fmt.Sprintf("Error: unexpected phase %d", m.currentPhase))
 			m.endSession("error")
 			return m, nil
 		}
@@ -414,14 +455,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if ralphStatus != nil {
 				taskID = ralphStatus.Task
 			}
-			m.analytics.addIteration(m.iteration, elapsed, true, taskID, "COMPLETE overridden — ready work remains", "OVERRIDE", 0)
+			m.analytics.addIteration(m.iteration, elapsed, true, taskID, m.currentTaskTitle, "COMPLETE overridden — ready work remains", "CONTINUE", 0)
 			m.sendEvent(EventIterationCompleted, map[string]any{
 				"iteration":     m.iteration,
 				"duration_ms":   elapsed.Milliseconds(),
 				"task_id":       taskID,
 				"passed":        true,
 				"notes":         "COMPLETE overridden — ready work remains",
-				"final_verdict": "OVERRIDE",
+				"final_verdict": "CONTINUE",
 			})
 
 			return m, tea.Tick(m.sleep, func(time.Time) tea.Msg {
@@ -442,7 +483,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if ralphStatus != nil {
 			taskID = ralphStatus.Task
 		}
-		m.analytics.addIteration(m.iteration, elapsed, true, taskID, "No ready work remaining (verified)", "COMPLETE", 0)
+		m.analytics.addIteration(m.iteration, elapsed, true, taskID, m.currentTaskTitle, "No ready work remaining (verified)", "COMPLETE", 0)
 		m.sendEvent(EventIterationCompleted, map[string]any{
 			"iteration":     m.iteration,
 			"duration_ms":   elapsed.Milliseconds(),

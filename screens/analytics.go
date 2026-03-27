@@ -31,6 +31,10 @@ var (
 			Foreground(lipgloss.Color("82")).
 			Bold(true)
 
+	continueStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("214")).
+			Bold(true)
+
 	failedStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("196")).
 			Bold(true)
@@ -64,10 +68,13 @@ type AnalyticsData struct {
 	CurrentIterStart   time.Time // For "Current" timing
 
 	// Task tracking
-	InitialReady int
-	CurrentReady int
-	TasksClosed  int
-	LastTask     string
+	InitialReady     int
+	CurrentReady     int
+	TasksClosed      int
+	LastTask         string
+	TotalTasks       int
+	BlockedCount     int
+	CurrentTaskTitle string
 
 	// Hub reporting
 	HubURL        string
@@ -83,6 +90,7 @@ type IterationRecord struct {
 	Duration     time.Duration
 	Passed       bool
 	TaskID       string
+	TaskTitle    string
 	Notes        string
 	ReviewCycles int
 	FinalVerdict string
@@ -191,34 +199,68 @@ func renderTimingPanel(data AnalyticsData) string {
 	return b.String()
 }
 
+func renderProgressBar(completed, total, width int) string {
+	if total == 0 {
+		return ""
+	}
+	barWidth := width - 8 // room for "  XX%  "
+	if barWidth < 10 {
+		barWidth = 10
+	}
+	filled := barWidth * completed / total
+	if filled > barWidth {
+		filled = barWidth
+	}
+	pct := float64(completed) / float64(total) * 100
+
+	bar := strings.Repeat("█", filled) + strings.Repeat("░", barWidth-filled)
+	return fmt.Sprintf("  %s  %.0f%%", bar, pct)
+}
+
 func renderTaskPanel(data AnalyticsData) string {
 	var b strings.Builder
 	b.WriteString(titleStyle.Render("Task Tracking") + "\n\n")
 
-	// Ready queue size
-	b.WriteString(labelStyle.Render("Initial Ready:"))
-	b.WriteString(valueStyle.Render(fmt.Sprintf("%d", data.InitialReady)))
+	// Completed / Total
+	completed := data.TasksClosed
+	total := data.TotalTasks
+	if total == 0 {
+		total = data.InitialReady // fallback if totalTasks not set
+	}
+	pct := 0.0
+	if total > 0 {
+		pct = float64(completed) / float64(total) * 100
+	}
+	b.WriteString(labelStyle.Render("Completed:"))
+	b.WriteString(passedStyle.Render(fmt.Sprintf("%d / %d  (%.0f%%)", completed, total, pct)))
 	b.WriteString("\n")
 
-	b.WriteString(labelStyle.Render("Current Ready:"))
+	// Progress bar
+	b.WriteString(renderProgressBar(completed, total, 30))
+	b.WriteString("\n\n")
+
+	// Ready / Blocked
+	b.WriteString(labelStyle.Render("Ready:"))
 	b.WriteString(valueStyle.Render(fmt.Sprintf("%d", data.CurrentReady)))
 	b.WriteString("\n")
 
-	// Tasks closed
-	b.WriteString(labelStyle.Render("Tasks Closed:"))
-	b.WriteString(passedStyle.Render(fmt.Sprintf("%d", data.TasksClosed)))
-	b.WriteString("\n")
-
-	// Last task
-	lastTask := data.LastTask
-	if lastTask == "" {
-		lastTask = "-"
-	}
-	b.WriteString(labelStyle.Render("Last Task:"))
-	b.WriteString(valueStyle.Render(lastTask))
+	b.WriteString(labelStyle.Render("Blocked:"))
+	b.WriteString(valueStyle.Render(fmt.Sprintf("%d", data.BlockedCount)))
 	b.WriteString("\n\n")
 
-	// Hub reporting
+	// Current task
+	taskDisplay := data.CurrentTaskTitle
+	if taskDisplay == "" {
+		taskDisplay = data.LastTask
+	}
+	if taskDisplay == "" {
+		taskDisplay = "-"
+	}
+	b.WriteString(labelStyle.Render("Current Task:"))
+	b.WriteString(valueStyle.Render(taskDisplay))
+	b.WriteString("\n\n")
+
+	// Hub section (unchanged)
 	b.WriteString(titleStyle.Render("Hub") + "\n\n")
 	if data.HubURL != "" {
 		b.WriteString(labelStyle.Render("Status:"))
@@ -247,7 +289,7 @@ func renderHistoryPanel(data AnalyticsData, width int) string {
 	}
 
 	// Table header
-	b.WriteString(tableHeaderStyle.Render(fmt.Sprintf("%-4s %-10s %-10s %-4s %-12s", "#", "Duration", "Verdict", "Cyc", "Task")))
+	b.WriteString(tableHeaderStyle.Render(fmt.Sprintf("%-4s %-10s %-10s %-4s %-24s", "#", "Duration", "Verdict", "Cyc", "Task")))
 	b.WriteString("\n")
 
 	// Show last 10 iterations
@@ -267,28 +309,33 @@ func renderHistoryPanel(data AnalyticsData, width int) string {
 		}
 		var verdictStr string
 		switch verdict {
-		case "APPROVED", "PASSED":
+		case "APPROVED", "PASSED", "COMPLETE":
 			verdictStr = passedStyle.Render(fmt.Sprintf("%-10s", verdict))
+		case "CONTINUE":
+			verdictStr = continueStyle.Render(fmt.Sprintf("%-10s", verdict))
 		default:
 			verdictStr = failedStyle.Render(fmt.Sprintf("%-10s", verdict))
 		}
 
-		taskID := record.TaskID
-		if len(taskID) > 12 {
-			taskID = taskID[:12]
+		taskDisplay := record.TaskTitle
+		if taskDisplay == "" {
+			taskDisplay = record.TaskID
 		}
-		if taskID == "" {
-			taskID = "-"
+		if len(taskDisplay) > 24 {
+			taskDisplay = taskDisplay[:24]
+		}
+		if taskDisplay == "" {
+			taskDisplay = "-"
 		}
 
 		cycles := fmt.Sprintf("%-4d", record.ReviewCycles)
 
-		row := fmt.Sprintf("%-4d %-10s %s %s %-12s",
+		row := fmt.Sprintf("%-4d %-10s %s %s %-24s",
 			record.Iteration,
 			record.Duration.Truncate(time.Second).String(),
 			verdictStr,
 			cycles,
-			taskID,
+			taskDisplay,
 		)
 		b.WriteString(tableRowStyle.Render(row))
 		b.WriteString("\n")

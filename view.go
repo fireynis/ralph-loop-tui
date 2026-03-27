@@ -122,13 +122,25 @@ func (m model) renderStatusBar() string {
 		)
 	}
 
+	if m.currentTaskTitle != "" {
+		taskDisplay := m.currentTaskTitle
+		if len(taskDisplay) > 40 {
+			taskDisplay = taskDisplay[:40]
+		}
+		content += fmt.Sprintf(" | %s %s",
+			statusLabelStyle.Render("Task:"),
+			statusValueStyle.Render(fmt.Sprintf("%q", taskDisplay)),
+		)
+	}
+
 	return statusBarStyle.Width(m.width).Render(content)
 }
 
 func (m model) renderScreen() string {
 	switch m.activeScreen {
 	case screenHomebase:
-		return screens.RenderHomebase(m.homebaseVP)
+		data := m.buildHomebaseData()
+		return screens.RenderHomebase(data, m.homebaseVP)
 	case screenOutput:
 		content := m.outputContent
 		if m.showRawOutput {
@@ -158,6 +170,7 @@ func (m model) buildAnalyticsData() screens.AnalyticsData {
 			Duration:     r.duration,
 			Passed:       r.passed,
 			TaskID:       r.taskID,
+			TaskTitle:    r.taskTitle,
 			Notes:        r.notes,
 			ReviewCycles: r.reviewCycles,
 			FinalVerdict: r.finalVerdict,
@@ -180,9 +193,55 @@ func (m model) buildAnalyticsData() screens.AnalyticsData {
 		CurrentReady:       m.analytics.currentReady,
 		TasksClosed:        m.analytics.tasksClosed,
 		LastTask:           m.analytics.lastTask(),
+		TotalTasks:         m.analytics.totalTasks,
+		BlockedCount:       m.analytics.blockedCount,
+		CurrentTaskTitle:   m.currentTaskTitle,
 		HubURL:             m.hubURL,
 		HubInstanceID:      m.hubInstanceID,
 		IterationHistory:   history,
+	}
+}
+
+func (m model) buildHomebaseData() screens.HomebaseData {
+	elapsed := time.Duration(0)
+	if !m.startTime.IsZero() {
+		end := m.endTime
+		if end.IsZero() {
+			end = time.Now()
+		}
+		elapsed = end.Sub(m.startTime)
+	}
+
+	history := make([]screens.IterationRecord, len(m.analytics.iterationHistory))
+	for i, r := range m.analytics.iterationHistory {
+		history[i] = screens.IterationRecord{
+			Iteration:    r.iteration,
+			Duration:     r.duration,
+			Passed:       r.passed,
+			TaskID:       r.taskID,
+			TaskTitle:    r.taskTitle,
+			Notes:        r.notes,
+			ReviewCycles: r.reviewCycles,
+			FinalVerdict: r.finalVerdict,
+		}
+	}
+
+	return screens.HomebaseData{
+		CurrentTaskID:    m.currentTaskID,
+		CurrentTaskTitle: m.currentTaskTitle,
+		CurrentPhase:     m.currentPhase.String(),
+		Iteration:        m.iteration,
+		MaxIterations:    m.maxIter,
+		IterationElapsed: elapsed,
+		Status:           string(m.status),
+		LoopDone:         m.loopDone,
+		TasksCompleted:   m.analytics.tasksClosed,
+		TotalTasks:       m.analytics.totalTasks,
+		PassedCount:      m.analytics.passedCount,
+		FailedCount:      m.analytics.failedCount,
+		ActivityLines:    m.activityLines,
+		GraphOutput:      m.graphOutput,
+		Iterations:       history,
 	}
 }
 
@@ -215,6 +274,12 @@ func (m model) renderHelpBar() string {
 			rawStatus = "raw"
 		}
 		keys = append(keys, helpKeyStyle.Render("r")+helpDescStyle.Render(fmt.Sprintf(":view(%s)", rawStatus)))
+	}
+
+	if m.demoMode {
+		scenario := demoScenarios[m.demoScenarioIdx]
+		keys = append(keys, helpKeyStyle.Render("n/p")+helpDescStyle.Render(
+			fmt.Sprintf(":scenario [%d/%d %s]", m.demoScenarioIdx+1, len(demoScenarios), scenario.name)))
 	}
 
 	return helpBarStyle.Width(m.width).Render(strings.Join(keys, "  "))

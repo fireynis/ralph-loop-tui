@@ -1,0 +1,592 @@
+package main
+
+import (
+	"context"
+	"strconv"
+	"time"
+
+	"github.com/charmbracelet/bubbles/viewport"
+	"github.com/google/uuid"
+)
+
+// demoScenario defines a synthetic state preset for UI testing
+type demoScenario struct {
+	name  string
+	apply func(*model)
+}
+
+// demoScenarios provides 7 presets covering the full lifecycle
+var demoScenarios = []demoScenario{
+	{"Fresh Start", applyFreshStart},
+	{"Early Session", applyEarlySession},
+	{"Mid-Session", applyMidSession},
+	{"Post-Failure", applyPostFailure},
+	{"Near Completion", applyNearCompletion},
+	{"Completed All", applyCompletedAll},
+	{"Completed Max", applyCompletedMax},
+}
+
+// demoModel creates a model with synthetic data for UI testing
+func demoModel() model {
+	ctx, cancel := context.WithCancel(context.Background())
+
+	homebaseVP := viewport.New(0, 0)
+	outputVP := viewport.New(0, 0)
+
+	m := model{
+		iteration:       0,
+		maxIter:         50,
+		status:          statusIdle,
+		statusText:      "Demo mode",
+		activeScreen:    screenHomebase,
+		homebaseVP:      homebaseVP,
+		outputVP:        outputVP,
+		homebaseContent: "",
+		outputContent:   "",
+		followOutput:    true,
+		analytics:       newAnalyticsData(),
+		sessionStart:    time.Now().Add(-15 * time.Minute),
+		sessionID:       uuid.New().String(),
+		claudePath:      "claude",
+		sleep:           2 * time.Second,
+		epic:            "DEMO-1",
+		maxReviewCycles: 3,
+		reporter:        &noopReporter{},
+		ctx:             ctx,
+		cancel:          cancel,
+		demoMode:        true,
+		demoScenarioIdx: 0,
+		currentPhase:    phaseContextGatherer,
+		repo:            "demo-repo",
+		instanceID:      "demo-instance",
+	}
+
+	applyDemoScenario(&m, 0)
+	return m
+}
+
+// applyDemoScenario resets and applies a scenario by index
+func applyDemoScenario(m *model, idx int) {
+	if idx < 0 || idx >= len(demoScenarios) {
+		idx = 0
+	}
+	m.demoScenarioIdx = idx
+	demoScenarios[idx].apply(m)
+	m.homebaseVP.SetContent(m.homebaseContent)
+	m.outputVP.SetContent(m.outputContent)
+	m.homebaseVP.GotoBottom()
+	m.outputVP.GotoBottom()
+}
+
+// addDemoHistory populates iteration history with synthetic records
+func addDemoHistory(m *model, records []iterationRecord) {
+	m.analytics.iterationHistory = records
+	m.analytics.passedCount = 0
+	m.analytics.failedCount = 0
+	m.analytics.tasksClosed = 0
+	for _, r := range records {
+		if r.passed {
+			m.analytics.passedCount++
+			if r.finalVerdict != "CONTINUE" && r.finalVerdict != "OVERRIDE" {
+				m.analytics.tasksClosed++
+			}
+		} else {
+			m.analytics.failedCount++
+		}
+	}
+}
+
+// applyFreshStart: iteration=0, 8 ready, 3 blocked, empty history
+func applyFreshStart(m *model) {
+	m.iteration = 0
+	m.maxIter = 50
+	m.status = statusIdle
+	m.statusText = "Waiting to start"
+	m.currentPhase = phaseContextGatherer
+	m.sessionStart = time.Now()
+	m.startTime = time.Time{}
+	m.endTime = time.Time{}
+	m.loopDone = false
+	m.epic = "DEMO-1"
+	m.currentTaskID = ""
+	m.currentTaskTitle = ""
+	m.analytics.initialReady = 8
+	m.analytics.currentReady = 8
+	m.analytics.totalTasks = 11
+	m.analytics.blockedCount = 3
+	m.analytics.iterationHistory = []iterationRecord{}
+	m.activityLines = nil
+	m.graphOutput = "  DEMO-1 [epic]\n    ├─ DEMO-101 [ready]\n    ├─ DEMO-102 [ready]\n    ├─ DEMO-103 [blocked by DEMO-101]\n    └─ ..."
+	m.homebaseContent = `Ralph loop starting...
+
+Pre-flight checks:
+- Ready tasks: 8
+- Blocked tasks: 3
+- In progress: 0
+- Total open: 11
+
+Dependency graph:
+  DEMO-1 [epic]
+    ├─ DEMO-101 [ready]
+    ├─ DEMO-102 [ready]
+    ├─ DEMO-103 [blocked by DEMO-101]
+    └─ ...
+
+Press Enter to start loop, q to quit.`
+	m.outputContent = "No iterations yet. Output will appear here when Ralph starts working."
+	m.rawOutputLog = ""
+}
+
+// applyEarlySession: iteration=2/50, 1 APPROVED in history, running context-gatherer
+func applyEarlySession(m *model) {
+	m.iteration = 2
+	m.maxIter = 50
+	m.status = statusRunning
+	m.statusText = "Running context-gatherer phase"
+	m.currentPhase = phaseContextGatherer
+	m.sessionStart = time.Now().Add(-8 * time.Minute)
+	m.startTime = time.Now().Add(-30 * time.Second)
+	m.endTime = time.Time{}
+	m.loopDone = false
+	m.epic = "DEMO-1"
+	m.analytics.initialReady = 8
+	m.analytics.currentReady = 7
+	m.analytics.totalTasks = 11
+	m.analytics.blockedCount = 3
+	m.currentTaskID = "beads-bbb2"
+	m.currentTaskTitle = "Setup DB migrations"
+	addDemoHistory(m, []iterationRecord{
+		{iteration: 1, duration: 4*time.Minute + 23*time.Second, passed: true, taskID: "DEMO-101", taskTitle: "Add user auth endpoint", notes: "Implemented user auth endpoint", reviewCycles: 1, finalVerdict: "APPROVED"},
+	})
+	m.activityLines = []string{
+		"  tool  🔧 Read(src/auth/handler.go)",
+		"  text  💬 Analyzing authentication patterns...",
+	}
+	m.graphOutput = "  DEMO-1 [epic]\n    ├─ DEMO-101 [done]\n    ├─ DEMO-102 [ready]\n    ├─ DEMO-103 [blocked by DEMO-101]\n    └─ ..."
+	m.homebaseContent = `[Iteration 1] DEMO-101: Implemented user auth endpoint
+  Duration: 4m23s | Review cycles: 1 | Verdict: APPROVED
+
+[Iteration 2] RUNNING (context-gatherer phase)
+  Elapsed: 30s | Gathering context for next task...`
+	m.outputContent = `[Context Gatherer output]
+task: DEMO-102
+cache_hit: partial
+patterns:
+- Use http.Handler pattern for all endpoints
+- Auth middleware via context.Context
+- Tests use httptest.NewRecorder
+- Follow repo style: package-level logger, explicit error returns`
+	m.rawOutputLog = `{"type":"assistant","message":{"content":[{"type":"text","text":"I'll start by reading the current task list and understanding the codebase structure."}]}}
+{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_01a","name":"Bash","input":{"command":"bd list --epic DEMO-1 --status ready"}}]}}
+{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_01a","content":"DEMO-102  Setup DB migrations  [ready]\nDEMO-103  Add password hashing  [blocked by DEMO-102]"}]}}
+{"type":"assistant","message":{"content":[{"type":"text","text":"I'll work on DEMO-102: Setup DB migrations. Let me examine the existing database code."}]}}
+{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_01b","name":"Read","input":{"file_path":"src/db/connection.go"}}]}}
+{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_01b","content":"package db\n\nimport \"database/sql\"\n\nfunc Connect(dsn string) (*sql.DB, error) {\n\treturn sql.Open(\"postgres\", dsn)\n}"}]}}
+{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_01c","name":"Glob","input":{"pattern":"src/db/**/*.go"}}]}}
+{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_01c","content":"src/db/connection.go\nsrc/db/queries.go"}]}}
+{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_01d","name":"Read","input":{"file_path":"src/auth/handler.go"}}]}}
+{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_01d","content":"package auth\n\nimport (\n\t\"net/http\"\n\t\"encoding/json\"\n)\n\nfunc HandleLogin(w http.ResponseWriter, r *http.Request) {\n\t// TODO: implement\n\tjson.NewEncoder(w).Encode(map[string]string{\"status\": \"ok\"})\n}"}]}}
+{"type":"assistant","message":{"content":[{"type":"text","text":"Now I understand the patterns. Let me create the migration framework."}]}}`
+}
+
+// applyMidSession: iteration=8/50, mix of APPROVED(5)/FAILED(1)/GAVE_UP(1)/CONTINUE(1), running dev
+func applyMidSession(m *model) {
+	m.iteration = 8
+	m.maxIter = 50
+	m.status = statusRunning
+	m.statusText = "Running dev phase"
+	m.currentPhase = phaseDev
+	m.sessionStart = time.Now().Add(-32 * time.Minute)
+	m.startTime = time.Now().Add(-90 * time.Second)
+	m.endTime = time.Time{}
+	m.loopDone = false
+	m.epic = "DEMO-1"
+	m.analytics.initialReady = 8
+	m.analytics.currentReady = 3
+	m.analytics.totalTasks = 12
+	m.analytics.blockedCount = 1
+	m.currentTaskID = "beads-ggg7"
+	m.currentTaskTitle = "Add request logging"
+	addDemoHistory(m, []iterationRecord{
+		{iteration: 1, duration: 4*time.Minute + 23*time.Second, passed: true, taskID: "DEMO-101", taskTitle: "Add user auth endpoint", notes: "Implemented user auth endpoint", reviewCycles: 1, finalVerdict: "APPROVED"},
+		{iteration: 2, duration: 3*time.Minute + 45*time.Second, passed: true, taskID: "DEMO-102", taskTitle: "Add session management", notes: "Added session management", reviewCycles: 1, finalVerdict: "APPROVED"},
+		{iteration: 3, duration: 5*time.Minute + 12*time.Second, passed: true, taskID: "DEMO-103", taskTitle: "DB migration for users", notes: "Database migration for users table", reviewCycles: 2, finalVerdict: "APPROVED"},
+		{iteration: 4, duration: 2*time.Minute + 58*time.Second, passed: false, taskID: "DEMO-104", taskTitle: "Fix integration timeout", notes: "Tests failed: timeout in integration test", reviewCycles: 3, finalVerdict: "GAVE_UP"},
+		{iteration: 5, duration: 4*time.Minute + 38*time.Second, passed: true, taskID: "DEMO-105", taskTitle: "Password reset flow", notes: "Password reset flow", reviewCycles: 1, finalVerdict: "APPROVED"},
+		{iteration: 6, duration: 0, passed: true, taskID: "", notes: "COMPLETE overridden", finalVerdict: "CONTINUE", reviewCycles: 0},
+		{iteration: 7, duration: 6*time.Minute + 15*time.Second, passed: true, taskID: "DEMO-104", taskTitle: "Fix integration timeout", notes: "Fixed timeout issue, increased test deadline", reviewCycles: 2, finalVerdict: "APPROVED"},
+	})
+	m.activityLines = []string{
+		"  tool  🔧 Write(src/rbac/middleware.go)",
+		"  result  📥 File written successfully",
+		"  tool  🔧 Bash(go test ./src/rbac/...)",
+		"  PASS  📥 ok  github.com/demo/app/src/rbac 1.2s",
+	}
+	m.graphOutput = "  DEMO-1 [epic]\n    ├─ DEMO-101 [done]\n    ├─ DEMO-102 [done]\n    ├─ DEMO-103 [done]\n    ├─ DEMO-107 [in-progress]\n    └─ DEMO-108 [blocked by DEMO-107]"
+	m.homebaseContent = `[Iteration 7] DEMO-106: Email verification endpoint
+  Duration: 3m29s | Review cycles: 1 | Verdict: APPROVED
+
+[Iteration 8] RUNNING (dev phase)
+  Elapsed: 1m30s | Implementing next task...
+
+Progress: 7 completed, 3 ready, 1 blocked`
+	m.outputContent = `[Ralph status]
+ready_before: 4
+ready_after: 3
+task: DEMO-107
+tests: RUNNING
+notes: Implementing role-based access control, tests in progress`
+	m.rawOutputLog = `{"type":"assistant","message":{"content":[{"type":"text","text":"I'll implement the RBAC middleware for DEMO-107. Let me read the existing auth middleware first."}]}}
+{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_08a","name":"Read","input":{"file_path":"src/auth/middleware.go"}}]}}
+{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_08a","content":"package auth\n\nimport \"net/http\"\n\nfunc AuthMiddleware(next http.Handler) http.Handler {\n\treturn http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {\n\t\ttoken := r.Header.Get(\"Authorization\")\n\t\tif token == \"\" {\n\t\t\thttp.Error(w, \"unauthorized\", 401)\n\t\t\treturn\n\t\t}\n\t\tnext.ServeHTTP(w, r)\n\t})\n}"}]}}
+{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_08b","name":"Write","input":{"file_path":"src/rbac/middleware.go","content":"package rbac\n\nimport (\n\t\"context\"\n\t\"net/http\"\n)\n\ntype Role string\n\nconst (\n\tRoleAdmin  Role = \"admin\"\n\tRoleEditor Role = \"editor\"\n\tRoleViewer Role = \"viewer\"\n)\n\nfunc RequireRole(role Role) func(http.Handler) http.Handler {\n\treturn func(next http.Handler) http.Handler {\n\t\treturn http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {\n\t\t\tuserRole := r.Context().Value(\"role\").(Role)\n\t\t\tif !hasPermission(userRole, role) {\n\t\t\t\thttp.Error(w, \"forbidden\", 403)\n\t\t\t\treturn\n\t\t\t}\n\t\t\tnext.ServeHTTP(w, r)\n\t\t})\n\t}\n}"}}]}}
+{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_08b","content":"File written successfully"}]}}
+{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_08c","name":"Write","input":{"file_path":"src/rbac/middleware_test.go","content":"package rbac\n\nimport (\n\t\"net/http\"\n\t\"net/http/httptest\"\n\t\"testing\"\n)\n\nfunc TestRequireRole_Admin(t *testing.T) {\n\t// test admin access\n}"}}]}}
+{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_08c","content":"File written successfully"}]}}
+{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_08d","name":"Bash","input":{"command":"cd /repo && go test ./src/rbac/..."}}]}}
+{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_08d","content":"ok  \tgithub.com/demo/app/src/rbac\t1.234s\n\nPASS"}]}}
+{"type":"assistant","message":{"content":[{"type":"text","text":"All tests pass. Let me commit and close the task."}]}}
+{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_08e","name":"Bash","input":{"command":"cd /repo && git add -A && git commit -m \"feat: add RBAC middleware with role-based access control\""}}]}}
+{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_08e","content":"[main abc1234] feat: add RBAC middleware with role-based access control\n 3 files changed, 87 insertions(+)"}]}}`
+}
+
+// applyPostFailure: iteration=6/50, last was GAVE_UP with 3 review cycles
+func applyPostFailure(m *model) {
+	m.iteration = 6
+	m.maxIter = 50
+	m.status = statusCompleted
+	m.statusText = "Iteration complete (GAVE_UP after 3 review cycles)"
+	m.currentPhase = phaseFixer
+	m.sessionStart = time.Now().Add(-25 * time.Minute)
+	m.startTime = time.Now().Add(-7*time.Minute - 45*time.Second)
+	m.endTime = time.Now()
+	m.loopDone = false
+	m.epic = "DEMO-1"
+	m.analytics.initialReady = 8
+	m.analytics.currentReady = 7
+	m.analytics.totalTasks = 11
+	m.analytics.blockedCount = 3
+	m.currentTaskID = "beads-fff6"
+	m.currentTaskTitle = "Fix race condition"
+	addDemoHistory(m, []iterationRecord{
+		{iteration: 1, duration: 4*time.Minute + 23*time.Second, passed: true, taskID: "DEMO-101", taskTitle: "Add user auth endpoint", notes: "Implemented user auth endpoint", reviewCycles: 1, finalVerdict: "APPROVED"},
+		{iteration: 2, duration: 3*time.Minute + 45*time.Second, passed: true, taskID: "DEMO-102", taskTitle: "Add session management", notes: "Added session management", reviewCycles: 1, finalVerdict: "APPROVED"},
+		{iteration: 3, duration: 5*time.Minute + 12*time.Second, passed: true, taskID: "DEMO-103", taskTitle: "DB migration for users", notes: "Database migration for users table", reviewCycles: 2, finalVerdict: "APPROVED"},
+		{iteration: 4, duration: 2*time.Minute + 58*time.Second, passed: false, taskID: "DEMO-104", taskTitle: "Fix integration timeout", notes: "Tests failed: timeout in integration test", reviewCycles: 3, finalVerdict: "GAVE_UP"},
+		{iteration: 5, duration: 4*time.Minute + 38*time.Second, passed: true, taskID: "DEMO-105", taskTitle: "Password reset flow", notes: "Password reset flow", reviewCycles: 1, finalVerdict: "APPROVED"},
+		{iteration: 6, duration: 7*time.Minute + 45*time.Second, passed: false, taskID: "DEMO-106", taskTitle: "Fix race condition", notes: "Reviewer found race condition, fixer unable to resolve after 3 cycles", reviewCycles: 3, finalVerdict: "GAVE_UP"},
+	})
+	m.activityLines = []string{
+		"  FAIL  📥 FAIL github.com/demo/app/src/session 0.8s",
+		"  text  💬 Race condition detected in cleanup goroutine",
+	}
+	m.graphOutput = "  DEMO-1 [epic]\n    ├─ DEMO-101..105 [done]\n    ├─ DEMO-106 [failed]\n    └─ DEMO-107..108 [blocked]"
+	m.homebaseContent = `[Iteration 5] DEMO-105: Password reset flow
+  Duration: 4m38s | Review cycles: 1 | Verdict: APPROVED
+
+[Iteration 6] DEMO-106: Race condition found, GAVE_UP after 3 review cycles
+  Duration: 7m45s | Review cycles: 3 | Verdict: GAVE_UP
+  Notes: Reviewer found race condition, fixer unable to resolve
+
+Waiting 2s before next iteration...`
+	m.outputContent = `[Reviewer status]
+verdict: CHANGES_REQUESTED
+specialist: senior Go engineer
+issues:
+- Race condition in session cleanup goroutine
+- Missing mutex protection on shared map access
+notes: Critical concurrency bug that could cause crashes
+
+[Fixer attempt 3]
+I've tried multiple approaches but the race persists. Need human intervention.
+
+[Ralph status]
+ready_before: 8
+ready_after: 7
+task: DEMO-106
+tests: FAILED
+notes: GAVE_UP after 3 review cycles, needs manual fix`
+	m.rawOutputLog = `{"type":"assistant","message":{"content":[{"type":"text","text":"I need to fix the race condition in the session cleanup goroutine. Let me examine the code."}]}}
+{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_06a","name":"Read","input":{"file_path":"src/session/cleanup.go"}}]}}
+{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_06a","content":"package session\n\nvar activeSessions = map[string]*Session{}\n\nfunc cleanupExpired() {\n\tfor id, s := range activeSessions {\n\t\tif s.IsExpired() {\n\t\t\tdelete(activeSessions, id)\n\t\t}\n\t}\n}"}]}}
+{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_06b","name":"Write","input":{"file_path":"src/session/cleanup.go","content":"package session\n\nimport \"sync\"\n\nvar (\n\tmu             sync.RWMutex\n\tactiveSessions = map[string]*Session{}\n)\n\nfunc cleanupExpired() {\n\tmu.Lock()\n\tdefer mu.Unlock()\n\tfor id, s := range activeSessions {\n\t\tif s.IsExpired() {\n\t\t\tdelete(activeSessions, id)\n\t\t}\n\t}\n}"}}]}}
+{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_06b","content":"File written successfully"}]}}
+{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_06c","name":"Bash","input":{"command":"cd /repo && go test -race ./src/session/..."}}]}}
+{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_06c","content":"--- FAIL: TestConcurrentCleanup (0.82s)\n    cleanup_test.go:45: race detected during cleanup\nFAIL\tgithub.com/demo/app/src/session\t0.823s\nFAIL"}]}}
+{"type":"assistant","message":{"content":[{"type":"text","text":"The race still persists — there must be another access point. Let me check for other goroutines accessing the map."}]}}
+{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_06d","name":"Grep","input":{"pattern":"activeSessions","path":"src/session/"}}]}}
+{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_06d","content":"src/session/cleanup.go:5:activeSessions = map[string]*Session{}\nsrc/session/manager.go:18:activeSessions[s.ID] = s\nsrc/session/manager.go:23:return activeSessions[id]"}]}}
+{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_06e","name":"Bash","input":{"command":"cd /repo && go test -race ./src/session/..."}}]}}
+{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_06e","content":"--- FAIL: TestConcurrentCleanup (0.79s)\n    cleanup_test.go:45: race detected during map access from manager\nFAIL\tgithub.com/demo/app/src/session\t0.791s\nFAIL"}]}}
+{"type":"assistant","message":{"content":[{"type":"text","text":"I've tried wrapping all access points with the mutex but the race persists due to a complex interaction with the HTTP handler goroutines. This needs a fundamental redesign using channels. Giving up after 3 attempts."}]}}
+{"type":"result","subtype":"success","is_error":false,"duration_ms":465000,"num_turns":14}`
+}
+
+// applyNearCompletion: iteration=15/50, 11 tasks completed, 1 remaining
+func applyNearCompletion(m *model) {
+	m.iteration = 15
+	m.maxIter = 50
+	m.status = statusCompleted
+	m.statusText = "Iteration complete"
+	m.currentPhase = phaseDev
+	m.sessionStart = time.Now().Add(-58 * time.Minute)
+	m.startTime = time.Now().Add(-3*time.Minute - 22*time.Second)
+	m.endTime = time.Now()
+	m.loopDone = false
+	m.epic = "DEMO-1"
+	m.analytics.initialReady = 8
+	m.analytics.currentReady = 1
+	m.analytics.totalTasks = 12
+	m.analytics.blockedCount = 0
+	m.currentTaskID = "beads-015"
+	m.currentTaskTitle = "Final integration test"
+	addDemoHistory(m, []iterationRecord{
+		{iteration: 1, duration: 4*time.Minute + 23*time.Second, passed: true, taskID: "DEMO-101", taskTitle: "Add user auth endpoint", notes: "Implemented user auth endpoint", reviewCycles: 1, finalVerdict: "APPROVED"},
+		{iteration: 2, duration: 3*time.Minute + 45*time.Second, passed: true, taskID: "DEMO-102", taskTitle: "Add session management", notes: "Added session management", reviewCycles: 1, finalVerdict: "APPROVED"},
+		{iteration: 3, duration: 5*time.Minute + 12*time.Second, passed: true, taskID: "DEMO-103", taskTitle: "DB migration for users", notes: "Database migration for users table", reviewCycles: 2, finalVerdict: "APPROVED"},
+		{iteration: 4, duration: 2*time.Minute + 58*time.Second, passed: false, taskID: "DEMO-104", taskTitle: "Fix integration timeout", notes: "Tests failed", reviewCycles: 3, finalVerdict: "GAVE_UP"},
+		{iteration: 5, duration: 4*time.Minute + 38*time.Second, passed: true, taskID: "DEMO-105", taskTitle: "Password reset flow", notes: "Password reset flow", reviewCycles: 1, finalVerdict: "APPROVED"},
+		{iteration: 6, duration: 6*time.Minute + 15*time.Second, passed: true, taskID: "DEMO-104", taskTitle: "Fix integration timeout", notes: "Fixed previous failure", reviewCycles: 2, finalVerdict: "APPROVED"},
+		{iteration: 7, duration: 3*time.Minute + 29*time.Second, passed: true, taskID: "DEMO-106", taskTitle: "Email verification", notes: "Email verification", reviewCycles: 1, finalVerdict: "APPROVED"},
+		{iteration: 8, duration: 4*time.Minute + 52*time.Second, passed: true, taskID: "DEMO-107", taskTitle: "RBAC implementation", notes: "RBAC implementation", reviewCycles: 1, finalVerdict: "APPROVED"},
+		{iteration: 9, duration: 3*time.Minute + 18*time.Second, passed: true, taskID: "DEMO-108", taskTitle: "Admin dashboard", notes: "Admin dashboard", reviewCycles: 1, finalVerdict: "APPROVED"},
+		{iteration: 10, duration: 5*time.Minute + 44*time.Second, passed: true, taskID: "DEMO-109", taskTitle: "Audit logging", notes: "Audit logging", reviewCycles: 2, finalVerdict: "APPROVED"},
+		{iteration: 11, duration: 2*time.Minute + 38*time.Second, passed: true, taskID: "DEMO-110", taskTitle: "Rate limiting", notes: "Rate limiting", reviewCycles: 1, finalVerdict: "APPROVED"},
+		{iteration: 12, duration: 4*time.Minute + 7*time.Second, passed: true, taskID: "DEMO-111", taskTitle: "API documentation", notes: "API documentation", reviewCycles: 1, finalVerdict: "APPROVED"},
+		{iteration: 13, duration: 3*time.Minute + 51*time.Second, passed: false, taskID: "DEMO-112", taskTitle: "Fix flaky test suite", notes: "Flaky integration test", reviewCycles: 3, finalVerdict: "GAVE_UP"},
+		{iteration: 14, duration: 5*time.Minute + 29*time.Second, passed: true, taskID: "DEMO-112", taskTitle: "Fix flaky test suite", notes: "Fixed test flakiness with proper mocking", reviewCycles: 2, finalVerdict: "APPROVED"},
+		{iteration: 15, duration: 3*time.Minute + 22*time.Second, passed: true, taskID: "DEMO-113", taskTitle: "Optimize auth queries", notes: "Performance optimization for auth queries", reviewCycles: 1, finalVerdict: "APPROVED"},
+	})
+	m.activityLines = []string{
+		"  COMMIT  💬 feat: optimize auth queries with index",
+		"  CLOSE  💬 Running bd close beads-113",
+		"  PASS  📥 ok  github.com/demo/app/... 3.4s",
+	}
+	m.graphOutput = "  DEMO-1 [epic]\n    ├─ DEMO-101..113 [done]\n    └─ DEMO-114 [ready]"
+	m.homebaseContent = `[Iteration 14] DEMO-112: Fixed test flakiness
+  Duration: 5m29s | Review cycles: 2 | Verdict: APPROVED
+
+[Iteration 15] DEMO-113: Performance optimization
+  Duration: 3m22s | Review cycles: 1 | Verdict: APPROVED
+
+Progress: 11/12 tasks completed, 1 ready, 0 blocked
+Session time: 58m | Avg: 4m12s/task`
+	m.outputContent = `[Ralph status]
+ready_before: 2
+ready_after: 1
+task: DEMO-113
+tests: PASSED
+notes: Added index on user_sessions.user_id, 80% query speedup
+
+One task remaining in epic DEMO-1.`
+	m.rawOutputLog = `{"type":"assistant","message":{"content":[{"type":"text","text":"Working on DEMO-113: Optimize auth queries. Let me profile the slow queries first."}]}}
+{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_15a","name":"Read","input":{"file_path":"src/auth/queries.go"}}]}}
+{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_15a","content":"package auth\n\nfunc GetUserSessions(db *sql.DB, userID string) ([]Session, error) {\n\trows, err := db.Query(\"SELECT * FROM user_sessions WHERE user_id = $1\", userID)\n\tif err != nil {\n\t\treturn nil, err\n\t}\n\tdefer rows.Close()\n\t// ...\n}"}]}}
+{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_15b","name":"Write","input":{"file_path":"src/db/migrations/007_add_session_index.sql","content":"CREATE INDEX idx_user_sessions_user_id ON user_sessions(user_id);\nCREATE INDEX idx_user_sessions_expires_at ON user_sessions(expires_at);"}}]}}
+{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_15b","content":"File written successfully"}]}}
+{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_15c","name":"Bash","input":{"command":"cd /repo && go test ./src/auth/... ./src/db/..."}}]}}
+{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_15c","content":"ok  \tgithub.com/demo/app/src/auth\t2.103s\nok  \tgithub.com/demo/app/src/db\t1.340s\n\nPASS"}]}}
+{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_15d","name":"Bash","input":{"command":"cd /repo && git add -A && git commit -m \"feat: optimize auth queries with index on user_sessions\""}}]}}
+{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_15d","content":"[main def5678] feat: optimize auth queries with index on user_sessions\n 2 files changed, 14 insertions(+)"}]}}
+{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_15e","name":"Bash","input":{"command":"bd close beads-113 --notes \"Added index on user_sessions.user_id, 80% query speedup\""}}]}}
+{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_15e","content":"Task beads-113 closed successfully."}]}}
+{"type":"assistant","message":{"content":[{"type":"text","text":"[Ralph status]\nready_before: 2\nready_after: 1\ntask: DEMO-113\ntests: PASSED\nnotes: Added index on user_sessions.user_id, 80% query speedup\n\nOne task remaining in epic DEMO-1."}]}}
+{"type":"result","subtype":"success","is_error":false,"duration_ms":202000,"num_turns":8}`
+}
+
+// applyCompletedAll: iteration=12/50, loopDone=true, all tasks done
+func applyCompletedAll(m *model) {
+	m.iteration = 12
+	m.maxIter = 50
+	m.status = statusFinished
+	m.statusText = "All tasks complete"
+	m.currentPhase = phaseDev
+	m.sessionStart = time.Now().Add(-48 * time.Minute)
+	m.startTime = time.Now().Add(-3*time.Minute - 44*time.Second)
+	m.endTime = time.Now()
+	m.loopDone = true
+	m.epic = "DEMO-1"
+	m.analytics.initialReady = 8
+	m.analytics.currentReady = 0
+	m.analytics.totalTasks = 12
+	m.analytics.blockedCount = 0
+	m.currentTaskID = ""
+	m.currentTaskTitle = ""
+	addDemoHistory(m, []iterationRecord{
+		{iteration: 1, duration: 4*time.Minute + 23*time.Second, passed: true, taskID: "DEMO-101", taskTitle: "Add user auth endpoint", notes: "User auth endpoint", reviewCycles: 1, finalVerdict: "APPROVED"},
+		{iteration: 2, duration: 3*time.Minute + 45*time.Second, passed: true, taskID: "DEMO-102", taskTitle: "Add session management", notes: "Session management", reviewCycles: 1, finalVerdict: "APPROVED"},
+		{iteration: 3, duration: 5*time.Minute + 12*time.Second, passed: true, taskID: "DEMO-103", taskTitle: "DB migration for users", notes: "Database migration", reviewCycles: 2, finalVerdict: "APPROVED"},
+		{iteration: 4, duration: 2*time.Minute + 58*time.Second, passed: false, taskID: "DEMO-104", taskTitle: "Fix integration timeout", notes: "Test timeout", reviewCycles: 3, finalVerdict: "GAVE_UP"},
+		{iteration: 5, duration: 4*time.Minute + 38*time.Second, passed: true, taskID: "DEMO-105", taskTitle: "Password reset flow", notes: "Password reset", reviewCycles: 1, finalVerdict: "APPROVED"},
+		{iteration: 6, duration: 6*time.Minute + 15*time.Second, passed: true, taskID: "DEMO-104", taskTitle: "Fix integration timeout", notes: "Fixed timeout", reviewCycles: 2, finalVerdict: "APPROVED"},
+		{iteration: 7, duration: 3*time.Minute + 29*time.Second, passed: true, taskID: "DEMO-106", taskTitle: "Email verification", notes: "Email verification", reviewCycles: 1, finalVerdict: "APPROVED"},
+		{iteration: 8, duration: 4*time.Minute + 52*time.Second, passed: true, taskID: "DEMO-107", taskTitle: "RBAC implementation", notes: "RBAC", reviewCycles: 1, finalVerdict: "APPROVED"},
+		{iteration: 9, duration: 3*time.Minute + 18*time.Second, passed: true, taskID: "DEMO-108", taskTitle: "Admin dashboard", notes: "Admin dashboard", reviewCycles: 1, finalVerdict: "APPROVED"},
+		{iteration: 10, duration: 5*time.Minute + 44*time.Second, passed: true, taskID: "DEMO-109", taskTitle: "Audit logging", notes: "Audit logging", reviewCycles: 2, finalVerdict: "APPROVED"},
+		{iteration: 11, duration: 2*time.Minute + 38*time.Second, passed: true, taskID: "DEMO-110", taskTitle: "Rate limiting", notes: "Rate limiting", reviewCycles: 1, finalVerdict: "APPROVED"},
+		{iteration: 12, duration: 3*time.Minute + 44*time.Second, passed: true, taskID: "DEMO-111", taskTitle: "Final cleanup and docs", notes: "Final cleanup and docs", reviewCycles: 1, finalVerdict: "APPROVED"},
+	})
+	m.activityLines = []string{
+		"  COMMIT  💬 chore: final cleanup and docs",
+		"  CLOSE  💬 Running bd close beads-111",
+	}
+	m.graphOutput = "  DEMO-1 [epic]\n    └─ All tasks complete"
+	m.homebaseContent = `[Iteration 11] DEMO-110: Rate limiting
+  Duration: 2m38s | Review cycles: 1 | Verdict: APPROVED
+
+[Iteration 12] DEMO-111: Final cleanup and docs
+  Duration: 3m44s | Review cycles: 1 | Verdict: APPROVED
+
+<promise>COMPLETE</promise>
+
+Session complete! All 8 tasks in epic DEMO-1 finished.
+- Total time: 48m
+- Tasks completed: 8
+- Avg time per task: 4m
+- Success rate: 92% (11 passed / 12 iterations)
+
+Press q to exit.`
+	m.outputContent = `[Ralph status]
+ready_before: 1
+ready_after: 0
+task: DEMO-111
+tests: PASSED
+notes: Added comprehensive README and cleaned up unused imports
+
+<promise>COMPLETE</promise>
+
+All tasks in epic DEMO-1 are now closed. No remaining work.
+
+Summary:
+- 8 features implemented
+- 11 commits
+- 1 retry after initial failure
+- All tests passing
+- Documentation updated`
+	m.rawOutputLog = `{"type":"assistant","message":{"content":[{"type":"text","text":"Working on the final task DEMO-111: cleanup and documentation. Let me review what needs tidying up."}]}}
+{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_12a","name":"Glob","input":{"pattern":"src/**/*.go"}}]}}
+{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_12a","content":"src/auth/handler.go\nsrc/auth/middleware.go\nsrc/auth/queries.go\nsrc/db/connection.go\nsrc/db/migrations.go\nsrc/rbac/middleware.go\nsrc/session/cleanup.go\nsrc/session/manager.go"}]}}
+{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_12b","name":"Bash","input":{"command":"cd /repo && goimports -l ./src/..."}}]}}
+{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_12b","content":"src/auth/handler.go\nsrc/session/manager.go"}]}}
+{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_12c","name":"Bash","input":{"command":"cd /repo && goimports -w ./src/auth/handler.go ./src/session/manager.go"}}]}}
+{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_12c","content":""}]}}
+{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_12d","name":"Bash","input":{"command":"cd /repo && go test ./..."}}]}}
+{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_12d","content":"ok  \tgithub.com/demo/app/src/auth\t1.892s\nok  \tgithub.com/demo/app/src/db\t0.943s\nok  \tgithub.com/demo/app/src/rbac\t1.104s\nok  \tgithub.com/demo/app/src/session\t0.812s\n\nPASS"}]}}
+{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_12e","name":"Bash","input":{"command":"cd /repo && git add -A && git commit -m \"chore: final cleanup — remove unused imports, add README\""}}]}}
+{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_12e","content":"[main ghi9012] chore: final cleanup — remove unused imports, add README\n 4 files changed, 52 insertions(+), 8 deletions(-)"}]}}
+{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_12f","name":"Bash","input":{"command":"bd close beads-111 --notes \"Final cleanup and documentation\""}}]}}
+{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_12f","content":"Task beads-111 closed successfully."}]}}
+{"type":"assistant","message":{"content":[{"type":"text","text":"[Ralph status]\nready_before: 1\nready_after: 0\ntask: DEMO-111\ntests: PASSED\nnotes: Added comprehensive README and cleaned up unused imports\n\n<promise>COMPLETE</promise>\n\nAll tasks in epic DEMO-1 are now closed. No remaining work."}]}}
+{"type":"result","subtype":"success","is_error":false,"duration_ms":224000,"num_turns":10}`
+}
+
+// applyCompletedMax: iteration=50/50, max iter reached, 3 remaining
+func applyCompletedMax(m *model) {
+	m.iteration = 50
+	m.maxIter = 50
+	m.status = statusFinished
+	m.statusText = "Max iterations reached"
+	m.currentPhase = phaseDev
+	m.sessionStart = time.Now().Add(-3*time.Hour - 25*time.Minute)
+	m.startTime = time.Now().Add(-5*time.Minute - 18*time.Second)
+	m.endTime = time.Now()
+	m.loopDone = true
+	m.epic = "DEMO-1"
+	m.analytics.initialReady = 8
+	m.analytics.currentReady = 3
+	m.analytics.totalTasks = 12
+	m.analytics.blockedCount = 3
+	m.currentTaskID = ""
+	m.currentTaskTitle = ""
+
+	// Build realistic history: 32 passed, 18 failed/gave up
+	history := make([]iterationRecord, 50)
+	taskNum := 101
+	for i := 0; i < 50; i++ {
+		passed := true
+		verdict := "APPROVED"
+		cycles := 1
+
+		// Create realistic failure pattern: some failures, some retries
+		if i == 3 || i == 8 || i == 12 || i == 19 || i == 24 || i == 29 || i == 35 || i == 38 || i == 43 {
+			passed = false
+			verdict = "GAVE_UP"
+			cycles = 3
+		} else if i == 16 || i == 22 || i == 27 || i == 31 || i == 41 || i == 47 {
+			cycles = 2
+		}
+
+		duration := time.Duration(2+i%5)*time.Minute + time.Duration(15+i%45)*time.Second
+		notes := "Task implementation"
+		if !passed {
+			notes = "Failed after multiple review cycles"
+		}
+
+		history[i] = iterationRecord{
+			iteration:    i + 1,
+			duration:     duration,
+			passed:       passed,
+			taskID:       "DEMO-" + strconv.Itoa(taskNum),
+			notes:        notes,
+			reviewCycles: cycles,
+			finalVerdict: verdict,
+		}
+
+		if passed || i%2 == 0 {
+			taskNum++
+		}
+	}
+	addDemoHistory(m, history)
+
+	m.activityLines = []string{
+		"  tool  🔧 Bash(go test ./...)",
+		"  PASS  📥 ok  github.com/demo/app/... 5.1s",
+	}
+	m.graphOutput = "  DEMO-1 [epic]\n    ├─ DEMO-101..136 [done]\n    ├─ DEMO-137 [ready]\n    ├─ DEMO-138 [ready]\n    └─ DEMO-139 [ready]"
+
+	m.homebaseContent = `[Iteration 49] DEMO-138: Task implementation
+  Duration: 5m23s | Review cycles: 1 | Verdict: APPROVED
+
+[Iteration 50] DEMO-139: Task implementation
+  Duration: 5m18s | Review cycles: 1 | Verdict: APPROVED
+
+Max iterations reached (50/50).
+
+Session summary:
+- Total time: 3h25m
+- Tasks completed: 32
+- Failed tasks: 18
+- Success rate: 64%
+- Remaining ready tasks: 3
+
+Ralph stopped due to iteration limit. Consider:
+1. Reviewing failed tasks for patterns
+2. Increasing -max-iterations if needed
+3. Manually addressing complex failures
+
+Press q to exit.`
+	m.outputContent = `[Ralph status]
+ready_before: 4
+ready_after: 3
+task: DEMO-139
+tests: PASSED
+notes: Implemented task but iteration limit reached
+
+Stopping due to max iterations (50).
+Remaining work: 3 ready tasks in epic DEMO-1.
+
+Consider reviewing the 18 failed iterations to identify systematic issues.`
+	m.rawOutputLog = `{"type":"assistant","message":{"content":[{"type":"text","text":"This is iteration 50. Let me pick up the next ready task and implement it."}]}}
+{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_50a","name":"Bash","input":{"command":"bd list --epic DEMO-1 --status ready"}}]}}
+{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_50a","content":"DEMO-137  Add webhook retry logic  [ready]\nDEMO-138  Implement batch processing  [ready]\nDEMO-139  Add health check endpoint  [ready]"}]}}
+{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_50b","name":"Read","input":{"file_path":"src/api/routes.go"}}]}}
+{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_50b","content":"package api\n\nimport \"net/http\"\n\nfunc SetupRoutes(mux *http.ServeMux) {\n\tmux.HandleFunc(\"/api/v1/users\", handleUsers)\n\tmux.HandleFunc(\"/api/v1/sessions\", handleSessions)\n}"}]}}
+{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_50c","name":"Write","input":{"file_path":"src/api/health.go","content":"package api\n\nimport (\n\t\"encoding/json\"\n\t\"net/http\"\n)\n\nfunc handleHealth(w http.ResponseWriter, r *http.Request) {\n\tjson.NewEncoder(w).Encode(map[string]string{\"status\": \"healthy\"})\n}"}}]}}
+{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_50c","content":"File written successfully"}]}}
+{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_50d","name":"Bash","input":{"command":"cd /repo && go test ./..."}}]}}
+{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_50d","content":"ok  \tgithub.com/demo/app/src/api\t1.456s\nok  \tgithub.com/demo/app/src/auth\t1.892s\nok  \tgithub.com/demo/app/src/db\t0.943s\n\nPASS"}]}}
+{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_50e","name":"Bash","input":{"command":"cd /repo && git add -A && git commit -m \"feat: add health check endpoint\""}}]}}
+{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_50e","content":"[main jkl3456] feat: add health check endpoint\n 2 files changed, 18 insertions(+)"}]}}
+{"type":"assistant","message":{"content":[{"type":"text","text":"[Ralph status]\nready_before: 4\nready_after: 3\ntask: DEMO-139\ntests: PASSED\nnotes: Implemented task but iteration limit reached"}]}}
+{"type":"result","subtype":"success","is_error":false,"duration_ms":318000,"num_turns":9}`
+}
