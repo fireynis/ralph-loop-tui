@@ -43,10 +43,10 @@ curl -sSfL -o "${TMP_DIR}/checksums.txt" "$CHECKSUMS_URL"
 
 # Verify checksum
 cd "$TMP_DIR"
-if command -v sha256sum >/dev/null 2>&1; then
-  grep "$ARCHIVE" checksums.txt | sha256sum -c --quiet
-elif command -v shasum >/dev/null 2>&1; then
+if command -v shasum >/dev/null 2>&1; then
   grep "$ARCHIVE" checksums.txt | shasum -a 256 -c --quiet
+elif command -v sha256sum >/dev/null 2>&1; then
+  grep "$ARCHIVE" checksums.txt | sha256sum -c --quiet
 else
   echo "Warning: no sha256sum or shasum found, skipping checksum verification" >&2
 fi
